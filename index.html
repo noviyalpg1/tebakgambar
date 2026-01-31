@@ -1,0 +1,443 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Play, RotateCcw, Volume2, VolumeX, Sparkles, Check, Star, Trophy, Image as ImageIcon, Upload, Loader2 } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, onSnapshot, collection } from 'firebase/firestore';
+
+// --- Firebase Configuration & Initialization ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+export default function App() {
+  const [isFlipping, setIsFlipping] = useState(false);
+  const [targetColor, setTargetColor] = useState(null);
+  const [rotation, setRotation] = useState(0);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [showConfetti, setShowConfetti] = useState(false);
+  const [gameState, setGameState] = useState('idle'); 
+  const [shuffledColors, setShuffledColors] = useState([]);
+  const [customLogo, setCustomLogo] = useState(null); 
+  const [isUploading, setIsUploading] = useState(false); // Indikator loading upload
+  const [user, setUser] = useState(null); // User auth state
+
+  const fileInputRef = useRef(null);
+
+  // Data Warna
+  const colors = [
+    { 
+      id: 'red', 
+      name: 'MERAH', 
+      hex: '#ef4444', 
+      bgClass: 'bg-red-500', 
+      borderClass: 'border-red-700',
+      textClass: 'text-red-600',
+      emoji: '🍎' 
+    },
+    { 
+      id: 'blue', 
+      name: 'BIRU', 
+      hex: '#3b82f6', 
+      bgClass: 'bg-blue-500', 
+      borderClass: 'border-blue-700',
+      textClass: 'text-blue-600',
+      emoji: '🐳' 
+    },
+    { 
+      id: 'yellow', 
+      name: 'KUNING', 
+      hex: '#fbbf24', 
+      bgClass: 'bg-yellow-400', 
+      borderClass: 'border-yellow-600',
+      textClass: 'text-yellow-600',
+      emoji: '⭐' 
+    },
+    { 
+      id: 'green', 
+      name: 'HIJAU', 
+      hex: '#22c55e', 
+      bgClass: 'bg-green-500', 
+      borderClass: 'border-green-700',
+      textClass: 'text-green-600',
+      emoji: '🐸' 
+    }
+  ];
+
+  // --- 1. Authentication Setup ---
+  useEffect(() => {
+    const initAuth = async () => {
+      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+        await signInWithCustomToken(auth, __initial_auth_token);
+      } else {
+        await signInAnonymously(auth);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  // --- 2. Realtime Data Sync (Firestore Listener) ---
+  useEffect(() => {
+    if (!user) return;
+
+    // Kita menggunakan koleksi 'public' agar logo bisa dilihat di semua device yang membuka App ID ini
+    const settingsDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'global');
+
+    const unsubscribe = onSnapshot(settingsDocRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        if (data.logoBase64) {
+          setCustomLogo(data.logoBase64);
+        }
+      }
+    }, (error) => {
+      console.error("Error fetching settings:", error);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // Helper untuk mengacak array (Fisher-Yates)
+  const shuffleArray = (array) => {
+    const newArray = [...array];
+    for (let i = newArray.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
+    }
+    return newArray;
+  };
+
+  const speak = (text) => {
+    if (!soundEnabled) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text.toLowerCase());
+    utterance.lang = 'id-ID';
+    utterance.rate = 0.9;
+    utterance.pitch = 1.1;
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const handleFlip = () => {
+    if (isFlipping) return;
+
+    setIsFlipping(true);
+    setGameState('flipping');
+    setShowConfetti(false);
+    setTargetColor(null);
+    setShuffledColors(shuffleArray(colors));
+    setRotation(prev => prev + 1800); 
+
+    setTimeout(() => {
+      const randomTarget = colors[Math.floor(Math.random() * colors.length)];
+      setTargetColor(randomTarget);
+      setIsFlipping(false);
+      setGameState('guessing');
+      speak(`Mana warna ${randomTarget.name}?`);
+    }, 1500);
+  };
+
+  const handleGuess = (selectedColor) => {
+    if (gameState !== 'guessing') return;
+
+    if (selectedColor.id === targetColor.id) {
+      setGameState('won');
+      setShowConfetti(true);
+      speak("Hebat! Itu warna " + targetColor.name);
+    } else {
+      speak("Coba lagi ya");
+    }
+  };
+
+  // --- Image Resizing & Upload Logic ---
+  const resizeImage = (file) => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const MAX_WIDTH = 300; // Resize ke ukuran kecil agar muat di database
+          const MAX_HEIGHT = 300;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > MAX_WIDTH) {
+              height *= MAX_WIDTH / width;
+              width = MAX_WIDTH;
+            }
+          } else {
+            if (height > MAX_HEIGHT) {
+              width *= MAX_HEIGHT / height;
+              height = MAX_HEIGHT;
+            }
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', 0.8)); // Convert ke Base64 JPG
+        };
+        img.src = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const handleLogoUpload = async (event) => {
+    if (!user) return; // Tunggu auth siap
+    const file = event.target.files[0];
+    if (!file) return;
+
+    setIsUploading(true);
+    try {
+      // 1. Resize gambar di browser (client-side)
+      const base64Image = await resizeImage(file);
+      
+      // 2. Simpan ke Firestore
+      const settingsDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'global');
+      await setDoc(settingsDocRef, { logoBase64: base64Image }, { merge: true });
+      
+      // State 'customLogo' akan otomatis terupdate lewat useEffect listener
+    } catch (error) {
+      console.error("Gagal upload gambar:", error);
+      alert("Gagal menyimpan gambar. Pastikan koneksi lancar.");
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  const triggerFileUpload = () => {
+    fileInputRef.current.click();
+  };
+
+  return (
+    <div className="min-h-screen bg-sky-100 font-sans selection:bg-pink-200 overflow-hidden flex flex-col items-center py-4 px-4 relative">
+      
+      <input 
+        type="file" 
+        ref={fileInputRef} 
+        className="hidden" 
+        accept="image/*" 
+        onChange={handleLogoUpload}
+      />
+
+      <header className="w-full max-w-md flex justify-between items-center mb-4 z-10">
+        <div className="bg-white px-4 py-2 rounded-2xl shadow-md border-b-4 border-sky-200">
+          <h1 className="text-xl md:text-2xl font-extrabold text-sky-600 tracking-tight">
+            Tebak <span className="text-pink-500">Warna</span>
+          </h1>
+        </div>
+        
+        <div className="flex gap-2">
+          <button 
+            onClick={triggerFileUpload}
+            disabled={isUploading}
+            className="p-3 bg-white rounded-full shadow-md border-b-4 border-gray-200 active:border-b-0 active:translate-y-1 transition-all group relative"
+            title="Ganti Logo Koin (Tersimpan Online)"
+          >
+            {isUploading ? (
+              <Loader2 className="text-blue-500 animate-spin" />
+            ) : (
+              <ImageIcon className="text-blue-500" />
+            )}
+            
+            {!customLogo && !isUploading && (
+              <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-pink-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-pink-500"></span>
+              </span>
+            )}
+          </button>
+
+          <button 
+            onClick={() => setSoundEnabled(!soundEnabled)}
+            className="p-3 bg-white rounded-full shadow-md border-b-4 border-gray-200 active:border-b-0 active:translate-y-1 transition-all"
+          >
+            {soundEnabled ? <Volume2 className="text-green-500" /> : <VolumeX className="text-gray-400" />}
+          </button>
+        </div>
+      </header>
+
+      <main className="flex-1 w-full max-w-md flex flex-col items-center relative z-10">
+        
+        {showConfetti && (
+          <div className="absolute inset-0 pointer-events-none z-0">
+            {[...Array(30)].map((_, i) => (
+              <div 
+                key={i}
+                className={`absolute w-3 h-3 rounded-full animate-bounce`}
+                style={{
+                  left: `${Math.random() * 100}%`,
+                  top: `${Math.random() * 50}%`,
+                  backgroundColor: ['#ef4444', '#3b82f6', '#fbbf24', '#22c55e'][Math.floor(Math.random() * 4)],
+                  animationDuration: `${1 + Math.random()}s`,
+                  animationDelay: `${Math.random() * 0.5}s`
+                }}
+              />
+            ))}
+          </div>
+        )}
+
+        <div className="relative w-56 h-56 perspective-1000 mb-6">
+          <div 
+            className="w-full h-full relative preserve-3d transition-transform duration-[1500ms] ease-out-cubic"
+            style={{ 
+              transformStyle: 'preserve-3d',
+              transform: `rotateY(${rotation}deg)` 
+            }}
+          >
+            {/* Sisi Depan (Logo) */}
+            <div 
+              className="absolute inset-0 w-full h-full rounded-full bg-white border-8 border-slate-300 flex items-center justify-center shadow-lg overflow-hidden"
+              style={{ backfaceVisibility: 'hidden' }}
+            >
+               {customLogo ? (
+                 <img 
+                   src={customLogo} 
+                   alt="Logo Custom" 
+                   className="w-full h-full object-cover p-2"
+                 />
+               ) : (
+                 <div className="flex flex-col items-center">
+                    <span className="text-8xl font-black text-slate-200">?</span>
+                    <p className="text-xs text-slate-400 mt-2 font-bold px-4 text-center">Tap ikon gambar diatas untuk ganti logo</p>
+                 </div>
+               )}
+            </div>
+
+            {/* Sisi Belakang (Soal) */}
+             <div 
+              className={`absolute inset-0 w-full h-full rounded-full bg-white border-[10px] border-sky-400 flex flex-col items-center justify-center shadow-lg`}
+              style={{ 
+                backfaceVisibility: 'hidden', 
+                transform: 'rotateY(180deg)' 
+              }}
+            >
+              {targetColor ? (
+                <>
+                  <p className="text-slate-500 font-bold text-lg mb-1">CARI WARNA:</p>
+                  <h2 className={`text-3xl font-black ${targetColor.textClass}`}>{targetColor.name}</h2>
+                  <div className="mt-2 text-4xl animate-bounce">{targetColor.emoji}</div>
+                </>
+              ) : (
+                <div className="w-full h-full rounded-full bg-slate-100" />
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className={`grid grid-cols-2 gap-4 w-full transition-all duration-500 ${gameState === 'guessing' || gameState === 'won' ? 'opacity-100 scale-100' : 'opacity-0 scale-90 pointer-events-none'}`}>
+          {shuffledColors.map((color) => (
+            <button
+              key={color.id}
+              onClick={() => handleGuess(color)}
+              disabled={gameState === 'won'}
+              className={`
+                h-28 rounded-2xl shadow-[0_6px_0_rgba(0,0,0,0.15)] active:shadow-none active:translate-y-1.5 transition-all
+                flex items-center justify-center border-4 border-white/50
+                ${color.bgClass}
+                ${gameState === 'won' && color.id !== targetColor.id ? 'opacity-40 grayscale' : 'hover:scale-105'}
+              `}
+            >
+              <div className="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center backdrop-blur-sm">
+                 {gameState === 'won' && color.id === targetColor.id && <Check className="w-10 h-10 text-white" />}
+              </div>
+            </button>
+          ))}
+        </div>
+
+      </main>
+
+      <footer className="w-full max-w-md py-4 z-20">
+        {(gameState === 'idle' || gameState === 'won') && (
+          <button
+            onClick={handleFlip}
+            className={`w-full group relative overflow-hidden rounded-3xl p-4 transition-all duration-200
+              bg-gradient-to-b from-sky-400 to-sky-600 hover:from-sky-300 hover:to-sky-500 
+              shadow-[0_8px_0_rgb(2,132,199)] active:shadow-none active:translate-y-2
+            `}
+          >
+            <div className="flex items-center justify-center gap-3">
+              {gameState === 'won' ? <RotateCcw className="w-8 h-8 text-white" /> : <Play className="w-8 h-8 text-white fill-current" />}
+              <span className="text-2xl font-bold text-white tracking-wider">
+                {gameState === 'won' ? 'MAIN LAGI' : 'MULAI MAIN'}
+              </span>
+            </div>
+          </button>
+        )}
+        
+        {gameState === 'guessing' && (
+          <div className="text-center p-4 bg-white/50 rounded-xl animate-pulse">
+            <p className="text-sky-700 font-bold text-xl">Pilih warna di bawah!</p>
+          </div>
+        )}
+      </footer>
+
+      {gameState === 'won' && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-300 overflow-hidden">
+          
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+             <div className="w-[200vh] h-[200vh] bg-[conic-gradient(from_0deg_at_50%_50%,rgba(255,255,255,0.1)_0deg,transparent_20deg,rgba(255,255,255,0.1)_40deg,transparent_60deg,rgba(255,255,255,0.1)_80deg,transparent_100deg,rgba(255,255,255,0.1)_120deg,transparent_140deg,rgba(255,255,255,0.1)_160deg,transparent_180deg,rgba(255,255,255,0.1)_200deg,transparent_220deg,rgba(255,255,255,0.1)_240deg,transparent_260deg,rgba(255,255,255,0.1)_280deg,transparent_300deg,rgba(255,255,255,0.1)_320deg,transparent_340deg,rgba(255,255,255,0.1)_360deg)] animate-spin-slow-bg opacity-40"></div>
+          </div>
+
+          <div className="relative bg-gradient-to-br from-white to-yellow-50 rounded-3xl p-6 md:p-8 max-w-sm w-full text-center shadow-[0_20px_60px_rgba(0,0,0,0.5)] border-[6px] border-yellow-400 transform animate-pop-in">
+            
+            <div className="absolute top-0 left-1/2 -translate-x-1/2 w-32 h-2 bg-yellow-400 rounded-b-xl shadow-sm"></div>
+
+            <div className="relative inline-block mb-4 mt-2">
+              <div className="absolute inset-0 bg-yellow-400/50 blur-3xl rounded-full animate-pulse-slow"></div>
+              
+              <Trophy className="relative z-10 w-32 h-32 text-yellow-500 mx-auto drop-shadow-lg filter stroke-[1.5px]" />
+              
+              <Star className="absolute -top-4 -right-4 w-12 h-12 text-orange-400 animate-spin-slow fill-yellow-300 stroke-orange-500 stroke-2" />
+              <Star className="absolute top-1/2 -left-8 w-8 h-8 text-yellow-400 animate-bounce fill-yellow-200 stroke-yellow-600 stroke-2" style={{ animationDelay: '0.2s' }} />
+              <Sparkles className="absolute bottom-0 right-0 w-8 h-8 text-yellow-600 animate-pulse fill-yellow-200" />
+            </div>
+            
+            <h2 className="text-6xl font-black text-transparent bg-clip-text bg-gradient-to-b from-yellow-400 to-orange-500 mb-1 drop-shadow-sm transform -rotate-3" style={{ textShadow: '3px 3px 0px #fff, 5px 5px 0px rgba(0,0,0,0.15)', WebkitTextStroke: '2px #f59e0b' }}>
+              HEBAT!
+            </h2>
+            
+            <p className="text-slate-500 font-bold text-lg mb-6 leading-tight">
+              Kamu menemukan warna:
+              <br/>
+              <span className={`inline-flex items-center gap-2 mt-3 px-6 py-2 rounded-full text-white text-2xl shadow-lg transform hover:scale-105 transition-transform border-4 border-white/30 ${targetColor?.bgClass}`}>
+                {targetColor?.emoji} {targetColor?.name}
+              </span>
+            </p>
+
+            <button
+              onClick={handleFlip}
+              className="w-full py-4 rounded-2xl bg-gradient-to-b from-green-400 to-green-600 text-white font-black text-2xl shadow-[0_6px_0_rgb(21,128,61)] hover:shadow-[0_8px_0_rgb(21,128,61)] hover:-translate-y-1 active:shadow-none active:translate-y-2 transition-all ring-4 ring-green-200"
+            >
+              MAIN LAGI
+            </button>
+          </div>
+        </div>
+      )}
+
+      <style>{`
+        .preserve-3d { transform-style: preserve-3d; }
+        .backface-hidden { backface-visibility: hidden; }
+        .perspective-1000 { perspective: 1000px; }
+        
+        .animate-spin-slow { animation: spin 4s linear infinite; }
+        .animate-spin-slow-bg { animation: spin 20s linear infinite; }
+        .animate-pulse-slow { animation: pulse 3s infinite; }
+        
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        
+        .animate-pop-in { animation: popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+        @keyframes popIn {
+          0% { transform: scale(0.5) translateY(50px); opacity: 0; }
+          100% { transform: scale(1) translateY(0); opacity: 1; }
+        }
+      `}</style>
+    </div>
+  );
+}
